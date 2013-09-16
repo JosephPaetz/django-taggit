@@ -20,6 +20,8 @@ from taggit.forms import TagField
 from taggit.models import TaggedItem, GenericTaggedItemBase
 from taggit.utils import require_instance_manager
 
+import string
+
 
 def _model_name(model):
     if VERSION < (1, 7):
@@ -71,18 +73,19 @@ class ExtraJoinRestriction(object):
 
 
 class TaggableManager(RelatedField, Field):
-    def __init__(self, verbose_name=_("Tags"),
+    def __init__(self, str_func=None, verbose_name=_("Tags"),
         help_text=_("A comma-separated list of tags."), through=None, blank=False):
         Field.__init__(self, verbose_name=verbose_name, help_text=help_text, blank=blank)
         self.through = through or TaggedItem
         self.rel = TaggableRel(self)
+        self.str_func = str_func
 
     def __get__(self, instance, model):
         if instance is not None and instance.pk is None:
             raise ValueError("%s objects need to have a primary key value "
                 "before you can access their tags." % model.__name__)
         manager = _TaggableManager(
-            through=self.through, model=model, instance=instance
+            through=self.through, model=model, instance=instance, str_func=self.str_func
         )
         return manager
 
@@ -131,7 +134,7 @@ class TaggableManager(RelatedField, Field):
         defaults = {
             "label": capfirst(self.verbose_name),
             "help_text": self.help_text,
-            "required": not self.blank
+            "required": False
         }
         defaults.update(kwargs)
         return form_class(**defaults)
@@ -173,7 +176,7 @@ class TaggableManager(RelatedField, Field):
     def extra_filters(self, pieces, pos, negate):
         if negate or not self.use_gfk:
             return []
-        prefix = "__".join(["tagged_items"] + pieces[:pos-2])
+        prefix = "__".join(["tagged_items"] + pieces[:pos - 2])
         get = ContentType.objects.get_for_model
         cts = [get(obj) for obj in _get_subclasses(self.model)]
         if len(cts) == 1:
@@ -193,7 +196,7 @@ class TaggableManager(RelatedField, Field):
             extra_where = " AND %s.%s = %%s" % (qn(alias_to_join), qn(extra_col))
             params = [content_type_id]
         else:
-            extra_where = " AND %s.%s IN (%s)" % (qn(alias_to_join), qn(extra_col), ','.join(['%s']*len(content_type_ids)))
+            extra_where = " AND %s.%s IN (%s)" % (qn(alias_to_join), qn(extra_col), ','.join(['%s'] * len(content_type_ids)))
             params = content_type_ids
         return extra_where, params
 
@@ -312,10 +315,11 @@ class TaggableManager(RelatedField, Field):
 
 
 class _TaggableManager(models.Manager):
-    def __init__(self, through, model, instance):
+    def __init__(self, through, model, instance, str_func):
         self.through = through
         self.model = model
         self.instance = instance
+        self.str_func = str_func
 
     def get_query_set(self):
         return self.through.tags_for(self.model, self.instance)
@@ -328,24 +332,14 @@ class _TaggableManager(models.Manager):
 
     @require_instance_manager
     def add(self, *tags):
-        str_tags = set([
-            t
-            for t in tags
-            if not isinstance(t, self.through.tag_model())
-        ])
-        tag_objs = set(tags) - str_tags
-        # If str_tags has 0 elements Django actually optimizes that to not do a
-        # query.  Malcolm is very smart.
-        existing = self.through.tag_model().objects.filter(
-            name__in=str_tags
-        )
-        tag_objs.update(existing)
-
-        for new_tag in str_tags - set(t.name for t in existing):
-            tag_objs.add(self.through.tag_model().objects.create(name=new_tag))
-
-        for tag in tag_objs:
+        """Supports adding tag instances and string representations of tags"""
+        for tag in tags:
+            if not isinstance(tag, self.through.tag_model()):
+                if self.str_func:
+                    tag = getattr(string, self.str_func)(tag)
+                tag = self.through.tag_model().objects.get_or_create(name=tag)[0]
             self.through.objects.get_or_create(tag=tag, **self._lookup_kwargs())
+
 
     @require_instance_manager
     def names(self):
